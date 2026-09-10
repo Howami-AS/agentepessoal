@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#0f172a">
+  <link rel="manifest" href="./manifest.json">
+  <title>Agente Pessoal</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Dexie.js (IndexedDB) -->
+  <script src="https://unpkg.com/dexie@latest/dist/dexie.js"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bgDark: '#0f172a',
+            cardDark: '#1e293b',
+            accent: '#38bdf8'
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="bg-bgDark text-slate-100 font-sans min-h-screen flex flex-col justify-between">
+
+  <!-- Cabeçalho -->
+  <header class="p-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/50 backdrop-blur">
+    <div>
+      <h1 class="text-lg font-bold text-sky-400">Olá! 👋</h1>
+      <p id="current-date" class="text-xs text-slate-400">Carregando data...</p>
+    </div>
+    <button id="install-btn" class="hidden bg-sky-600 hover:bg-sky-500 text-white text-xs px-3 py-1.5 rounded-full font-medium shadow">
+      📲 Instalar App
+    </button>
+    <button id="reminder-btn" class="bg-slate-700 hover:bg-slate-600 text-white text-xs px-3 py-1.5 rounded-full font-medium shadow">
+      🔔 Ativar lembretes
+    </button>
+  </header>
+
+  <!-- Conteúdo Principal / Dashboard -->
+  <main class="flex-1 overflow-y-auto p-4 space-y-4">
+    
+    <!-- Resumo do Dia -->
+    <section class="bg-cardDark border border-slate-800 rounded-xl p-4 shadow-sm">
+      <h2 class="text-xs font-semibold text-sky-400 uppercase tracking-wider mb-3">Próximo Compromisso</h2>
+      <div id="next-event" class="text-sm text-slate-300 whitespace-pre-line">
+        Nenhum compromisso próximo agendado.
+      </div>
+    </section>
+
+    <section class="bg-cardDark border border-slate-800 rounded-xl p-4 shadow-sm">
+      <div class="flex justify-between items-center mb-3">
+        <h2 class="text-xs font-semibold text-sky-400 uppercase tracking-wider">Meus Agendamentos</h2>
+        <div class="flex gap-3 items-center">
+          <button id="export-agenda" type="button" class="text-xs text-sky-400 hover:text-sky-300">Exportar</button>
+          <button id="import-agenda" type="button" class="text-xs text-sky-400 hover:text-sky-300">Importar</button>
+          <button id="refresh-agenda" type="button" class="text-xs text-sky-400 hover:text-sky-300">Atualizar</button>
+          <input id="import-file" type="file" accept="application/json,.json" class="hidden">
+        </div>
+      </div>
+      <div id="agenda-list" class="space-y-2 text-sm text-slate-300">
+        Carregando agendamentos...
+      </div>
+    </section>
+
+    <section class="bg-cardDark border border-slate-800 rounded-xl p-4 shadow-sm">
+      <div class="flex justify-between items-center mb-3">
+        <h2 class="text-xs font-semibold text-sky-400 uppercase tracking-wider">Visão semanal</h2>
+        <div class="flex gap-2">
+          <button id="previous-week" type="button" class="text-xs text-sky-400 hover:text-sky-300" aria-label="Semana anterior">Anterior</button>
+          <button id="current-week" type="button" class="text-xs text-sky-400 hover:text-sky-300">Hoje</button>
+          <button id="next-week" type="button" class="text-xs text-sky-400 hover:text-sky-300" aria-label="Próxima semana">Próxima</button>
+        </div>
+      </div>
+      <p id="week-label" class="text-xs text-slate-400 mb-3"></p>
+      <div id="week-view" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-2"></div>
+    </section>
+
+    <!-- Histórico do Chat com o Agente -->
+    <section class="space-y-3" id="chat-messages">
+      <div class="bg-slate-800/60 p-3 rounded-lg max-w-[85%] text-sm text-slate-200 border border-slate-700/50">
+        🤖 Olá! Sou seu assistente pessoal. O que você precisa organizar hoje? 
+        <br><span class="text-xs text-slate-400 mt-1 block">Exemplo: "Tenho dentista amanhã às 9 da manhã"</span>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Entrada do Chat / Voz -->
+  <footer class="p-4 bg-slate-900 border-t border-slate-800">
+    <form id="agent-form" class="flex gap-2 items-center">
+      <button type="button" id="voice-btn" class="p-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-full border border-slate-700 transition" title="Falar">
+        🎙️
+      </button>
+      <input type="text" id="user-input" placeholder="Digite ou fale uma instrução..." class="flex-1 bg-slate-800 border border-slate-700 rounded-full px-4 py-2 text-sm text-white focus:outline-none focus:border-sky-500" required>
+      <button type="submit" class="p-2.5 bg-sky-600 hover:bg-sky-500 text-white rounded-full transition">
+        ➔
+      </button>
+    </form>
+  </footer>
+
+  <script type="module">
+    import * as chrono from 'https://cdn.jsdelivr.net/npm/chrono-node@2.7.5/+esm';
+
+    // 1. Inicializar Banco de Dados IndexedDB com Dexie.js
+    const db = new Dexie('AgentePessoalDB');
+    db.version(1).stores({
+      agenda: '++id, title, date, type'
+    });
+
+    // Data Atual
+    document.getElementById('current-date').innerText = new Date().toLocaleDateString('pt-BR', {
+      weekday: 'long', day: 'numeric', month: 'long'
+    });
+
+    // 2. Registrar Service Worker PWA
+    if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+      navigator.serviceWorker.register('./sw.js').catch(console.error);
+    }
+
+    // Banner de Instalação PWA
+    let deferredPrompt;
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      deferredPrompt = e;
+      const installBtn = document.getElementById('install-btn');
+      installBtn.classList.remove('hidden');
+      installBtn.addEventListener('click', () => {
+        deferredPrompt.prompt();
+        deferredPrompt = null;
+        installBtn.classList.add('hidden');
+      });
+    });
+
+    // 3. Processamento de Mensagens e Linguagem Natural
+    const form = document.getElementById('agent-form');
+    const input = document.getElementById('user-input');
+    const chat = document.getElementById('chat-messages');
+    let pendingEvent = null;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+
+      appendMessage(text, 'user');
+      input.value = '';
+
+      const command = text.toLowerCase();
+      if (/\b(ver|mostrar|mostre|listar|liste|agenda|agendamentos|compromissos)\b/.test(command)) {
+        await showEvents(text);
+        return;
+      }
+      if (/\b(cancelar|cancele|cancel|excluir|apagar|remover)\b/.test(command)) {
+        await cancelEvent(text);
+        return;
+      }
+
+      const parsedDate = parseRequestedDate(text);
+      if (/\b(alterar|altere|mudar|mude|remarcar|reagendar)\b/.test(command)) {
+        await changeEvent(text, parsedDate);
+        return;
+      }
+
+      if (parsedDate) {
+        const cleanTitle = extractEventTitle(text);
+        const eventTitle = cleanTitle || 'Novo Compromisso';
+        requestEventConfirmation({
+          title: eventTitle,
+          date: parsedDate,
+          type: text.toLowerCase().includes('lembre') ? 'lembrete' : 'compromisso',
+          recurrence: parseRecurrence(text)
+        });
+      } else if (isTaskCommand(text)) {
+        const taskTitle = extractTaskTitle(text);
+        requestEventConfirmation({ title: taskTitle || 'Nova tarefa', date: null, type: 'tarefa' });
+      } else {
+        appendMessage('👉 Entendi! Não identifiquei uma data/horário exato. Pode especificar quando seria?', 'agent');
+      }
+    });
+
+    function isTaskCommand(text) {
+      return /\b(tarefa|to-?do|fazer|comprar|pagar|ligar|enviar|estudar)\b/i.test(text);
+    }
+
+    function extractTaskTitle(text) {
+      return text.replace(/^\s*(?:crie|adicionar?|anote|registre|uma?)\s*/i, '')
+        .replace(/^\s*(?:tarefa|to-?do)\s*(?:de|para)?\s*/i, '')
+        .trim();
+    }
+
+    function parseRecurrence(text) {
+      const normalizedText = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const match = normalizedText.match(/\btod[ao]s?\s+(domingo|segunda(?:-feira)?|terca(?:-feira)?|quarta(?:-feira)?|quinta(?:-feira)?|sexta(?:-feira)?|sabado)\b/);
+      if (!match) return null;
+      const weekdays = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+      return { frequency: 'weekly', weekday: weekdays.findIndex(day => match[1].startsWith(day)) };
+    }
+
+    function requestEventConfirmation(event) {
+      pendingEvent = event;
+      const dateDescription = event.date
+        ? ` para ${formatEventDate(event.date)}`
+        : ' sem data definida';
+      const recurrenceDescription = event.recurrence ? ' (semanal)' : '';
+      const message = appendMessage(`Confirma ${event.type === 'tarefa' ? 'a tarefa' : 'o compromisso'} **${event.title}**${dateDescription}${recurrenceDescription}?`, 'agent');
+      const actions = document.createElement('div');
+      actions.className = 'flex gap-2 mt-3';
+      const confirmButton = document.createElement('button');
+      confirmButton.type = 'button';
+      confirmButton.className = 'bg-emerald-700 hover:bg-emerald-600 text-white text-xs px-3 py-1.5 rounded';
+      confirmButton.innerText = 'Confirmar';
+      confirmButton.addEventListener('click', confirmPendingEvent);
+      const cancelButton = document.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = 'bg-slate-700 hover:bg-slate-600 text-slate-100 text-xs px-3 py-1.5 rounded';
+      cancelButton.innerText = 'Cancelar';
+      cancelButton.addEventListener('click', cancelPendingEvent);
+      actions.append(confirmButton, cancelButton);
+      message.appendChild(actions);
+    }
+
+    async function confirmPendingEvent() {
+      if (!pendingEvent) return;
+      const event = pendingEvent;
+      pendingEvent = null;
+      const events = [];
+      const occurrences = event.recurrence ? 12 : 1;
+      for (let index = 0; index < occurrences; index += 1) {
+        const date = event.date ? new Date(event.date) : null;
+        if (date && event.recurrence) date.setDate(date.getDate() + index * 7);
+        events.push({
+          title: event.title,
+          ...(date ? { date } : {}),
+          type: event.type,
+          recurrence: event.recurrence || null
+        });
+      }
+      await db.agenda.bulkAdd(events);
+      const dateDescription = event.date ? ` para ${formatEventDate(event.date)}` : '';
+      appendMessage(`✅ Registrado! **${event.title}**${dateDescription}${event.recurrence ? ' e repetido semanalmente por 12 semanas.' : '.'}`, 'agent');
+      updateNextEvent();
+    }
+
+    function cancelPendingEvent() {
+      pendingEvent = null;
+      appendMessage('Cadastro cancelado.', 'agent');
+    }
+
+    function extractEventTitle(text) {
+      return text
+        .replace(/\b(?:no|na|em)\s+(?=(?:amanhã|amanha|hoje|segunda-feira|segunda|terça-feira|terca-feira|terça|terca|quarta-feira|quarta|quinta-feira|quinta|sexta-feira|sexta|sábado|sabado|domingo)\b)/gi, '')
+        .replace(/\b(?:amanhã|amanha|hoje|segunda-feira|segunda|terça-feira|terca-feira|terça|terca|quarta-feira|quarta|quinta-feira|quinta|sexta-feira|sexta|sábado|sabado|domingo)\b/gi, '')
+        .replace(/\b(?:dia|em)\s+\d{1,2}(?:\/\d{1,2}(?:\/\d{2,4})?|\s+de\s+[a-zçã]+(?:\s+de\s+\d{4})?)?/gi, '')
+        .replace(/\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\b/g, '')
+        .replace(/(?:^|\s)(?:às|as|a)\s*\d{1,2}(?::\d{2})?\s*(?:h|horas?)?\s*(?:da\s*manhã|da\s*tarde|da\s*noite|am|pm)?/gi, ' ')
+        .replace(/\b\d{1,2}(?::\d{2})?\s*(?:h|horas?)\s*(?:da\s*manhã|da\s*tarde|da\s*noite|am|pm)?\b/gi, '')
+        .replace(/(?:às|as|a|à|de|da)\s*(?:manhã|manha|tarde|noite)(?=\s|$)/gi, '')
+        .replace(/\b(?:tenho|agende|marcar|me lembre de|lembrete de)\b/gi, '')
+        .replace(/\s{2,}/g, ' ')
+        .replace(/[ ,.]+$/g, '')
+        .trim();
+    }
+
+    function parseRequestedDate(text) {
+      const normalizedText = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      let parsedDate = chrono.pt.parseDate(text);
+      const weekdayNames = ['domingo', 'segunda', 'terca', 'quarta', 'quinta', 'sexta', 'sabado'];
+      const weekdayMatch = normalizedText.match(/\b(domingo|segunda|terca|quarta|quinta|sexta|sabado)(?:-feira)?\b/);
+      if (!parsedDate && weekdayMatch) {
+        const targetDay = weekdayNames.indexOf(weekdayMatch[1]);
+        parsedDate = new Date();
+        parsedDate.setHours(0, 0, 0, 0);
+        const daysUntilTarget = (targetDay - parsedDate.getDay() + 7) % 7 || 7;
+        parsedDate.setDate(parsedDate.getDate() + daysUntilTarget);
+      }
+      if (!parsedDate) return null;
+
+      const timeMatch = text.match(/(?:^|\s)(?:às|as|a)\s*(\d{1,2})(?::(\d{2}))?\s*(h|horas?)?\s*(da\s*manhã|da\s*tarde|da\s*noite|am|pm)?/i);
+      const periodMatch = normalizedText.match(/(?:^|\s)(?:de|da|a|as)\s*(manha|tarde|noite)(?=\s|$)/i);
+      const weekdayOnly = Boolean(weekdayMatch) && !/\d{1,2}[\/-]\d{1,2}|\bdia\s+\d{1,2}/i.test(normalizedText);
+
+      if (weekdayOnly && parsedDate < new Date()) {
+        parsedDate.setDate(parsedDate.getDate() + 7);
+      }
+
+      let hours = 9;
+      let minutes = 0;
+      let period = periodMatch ? periodMatch[1] : '';
+      if (timeMatch) {
+        hours = Number(timeMatch[1]);
+        minutes = Number(timeMatch[2] || 0);
+        period = (timeMatch[4] || period).toLowerCase().replace(/ã/g, 'a');
+      } else if (period === 'tarde') {
+        hours = 14;
+      } else if (period === 'noite') {
+        hours = 19;
+      }
+      if ((period.includes('tarde') || period.includes('noite') || period === 'pm') && hours < 12) hours += 12;
+      if (period.includes('manha') && hours === 12) hours = 0;
+      if (hours > 23 || minutes > 59) return parsedDate;
+
+      parsedDate.setHours(hours, minutes, 0, 0);
+      return parsedDate;
+    }
+
+    async function showEvents(text) {
+      const normalizedText = text.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      const now = new Date();
+      const weekStart = new Date(now);
+      const dayOfWeek = weekStart.getDay() || 7;
+      weekStart.setHours(0, 0, 0, 0);
+      weekStart.setDate(weekStart.getDate() - dayOfWeek + 1);
+      let start = now;
+      let end = null;
+
+      if (normalizedText.includes('esta semana')) {
+        start = weekStart;
+        end = new Date(weekStart);
+        end.setDate(end.getDate() + 7);
+      } else if (normalizedText.includes('proxima semana')) {
+        start = new Date(weekStart);
+        start.setDate(start.getDate() + 7);
+        end = new Date(start);
+        end.setDate(end.getDate() + 7);
+      } else if (normalizedText.includes('proximo mes')) {
+        start = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+        end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
+      } else if (normalizedText.includes('proximos meses')) {
+        start = now;
+      }
+
+      const events = await db.agenda.where('date').aboveOrEqual(start).toArray();
+      const filteredEvents = events.filter(event => !end || new Date(event.date) < end);
+      const isFarthestFirst = normalizedText.includes('mais longe') || normalizedText.includes('mais distante');
+      filteredEvents.sort((first, second) => {
+        const difference = new Date(first.date) - new Date(second.date);
+        return isFarthestFirst ? -difference : difference;
+      });
+
+      if (filteredEvents.length === 0) {
+        appendMessage('Não encontrei agendamentos nesse período.', 'agent');
+        return;
+      }
+
+      const period = normalizedText.includes('esta semana') ? 'esta semana' : normalizedText.includes('proxima semana') ? 'a próxima semana' : normalizedText.includes('proximo mes') ? 'o próximo mês' : 'os próximos meses';
+      const list = filteredEvents.map(event => {
+        const date = formatEventDate(event.date);
+        return `• **${event.title}** - ${date}`;
+      }).join('\n');
+      appendMessage(`📅 Agendamentos de ${period}:\n${list}`, 'agent');
+    }
+
+    async function findMatchingEvent(text) {
+      const ignoredWords = new Set([
+        'cancelar', 'cancele', 'cancel', 'excluir', 'apagar', 'remover',
+        'alterar', 'altere', 'mudar', 'mude', 'remarcar', 'reagendar',
+        'meu', 'minha', 'meus', 'minhas', 'compromisso', 'compromissos',
+        'evento', 'eventos', 'para', 'pra', 'o', 'a', 'de', 'do', 'da',
+        'no', 'na', 'em', 'as', 'às', 'um', 'uma', 'proximo', 'próximo',
+        'proxima', 'próxima', 'amanha', 'amanhã', 'hoje', 'segunda',
+        'terça', 'terca', 'quarta', 'quinta', 'sexta', 'sábado', 'sabado', 'domingo'
+      ]);
+      const commandWords = text.toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/\d{1,2}(?::\d{2})?|\b\d{4}\b/g, ' ')
+        .split(/[^a-z0-9]+/)
+        .filter(word => word.length > 2 && !ignoredWords.has(word));
+      const events = await db.agenda.where('date').above(new Date()).toArray();
+      events.sort((first, second) => new Date(first.date) - new Date(second.date));
+      return events.find(event => {
+        const title = event.title.toLowerCase();
+        return commandWords.length > 0 && commandWords.some(word => title.includes(word));
+      });
+    }
+
+    async function cancelEvent(text) {
+      const event = await findMatchingEvent(text);
+      if (!event) {
+        appendMessage('Informe o nome do compromisso que deseja cancelar, por exemplo: “cancele o dentista”.', 'agent');
+        return;
+      }
+      await db.agenda.delete(event.id);
+      appendMessage(`✅ Cancelado: **${event.title}**.`, 'agent');
+      updateNextEvent();
+    }
+
+    async function changeEvent(text, parsedDate) {
+      if (!parsedDate) {
+        appendMessage('Para alterar, informe também a nova data ou horário, por exemplo: “mude o dentista para sexta às 10”.', 'agent');
+        return;
+      }
+      const event = await findMatchingEvent(text);
+      if (!event) {
+        appendMessage('Não encontrei esse compromisso. Informe o nome dele, por exemplo: “mude o dentista para amanhã às 10”.', 'agent');
+        return;
+      }
+      await db.agenda.update(event.id, { date: parsedDate });
+      const formattedDate = formatEventDate(parsedDate);
+      appendMessage(`✅ Alterado: **${event.title}** para ${formattedDate}.`, 'agent');
+      updateNextEvent();
+    }
+
+    function appendMessage(msg, sender) {
+      const div = document.createElement('div');
+      div.className = sender === 'user' 
+        ? 'bg-sky-600/80 text-white p-3 rounded-lg max-w-[85%] text-sm ml-auto text-right shadow' 
+        : 'bg-slate-800/80 text-slate-200 p-3 rounded-lg max-w-[85%] text-sm border border-slate-700/50 shadow';
+      div.innerHTML = escapeMessage(msg);
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+      return div;
+    }
+
+    function escapeMessage(value) {
+      const escaped = value.replace(/[&<>'"]/g, character => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;'
+      }[character]));
+      return escaped.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+    }
+
+    function formatEventDate(value) {
+      const date = new Date(value);
+      const weekday = date.toLocaleDateString('pt-BR', { weekday: 'short' }).replace('.', '');
+      const datePart = date.toLocaleDateString('pt-BR');
+      const timePart = date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+      return `${weekday}, ${datePart}, ${timePart}`;
+    }
+
+    async function updateNextEvent() {
+      const next = await db.agenda.where('date').above(new Date()).first();
+      const nextEl = document.getElementById('next-event');
+      if (next) {
+        const dateStr = formatEventDate(next.date);
+        nextEl.innerText = `${next.title}\n📅 ${dateStr}`;
+      } else {
+        nextEl.innerText = 'Nenhum compromisso próximo agendado.';
+      }
+      renderAgenda();
+      renderWeek();
+      scheduleReminders();
+    }
+
+    async function renderAgenda() {
+      const list = document.getElementById('agenda-list');
+      const allItems = await db.agenda.toArray();
+      const events = allItems.filter(event => event.date && new Date(event.date) >= new Date());
+      const tasks = allItems.filter(event => event.type === 'tarefa');
+      events.sort((first, second) => new Date(first.date) - new Date(second.date));
+      list.replaceChildren();
+
+      if (events.length === 0 && tasks.length === 0) {
+        list.innerText = 'Nenhum agendamento futuro.';
+        return;
+      }
+
+      events.forEach(event => {
+        list.appendChild(createAgendaItem(event, formatEventDate(event.date)));
+      });
+
+      tasks.forEach(task => list.appendChild(createAgendaItem(task, 'Tarefa sem prazo')));
+    }
+
+    let weekOffset = 0;
+
+    async function renderWeek() {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const monday = new Date(today);
+      const day = monday.getDay() || 7;
+      monday.setDate(monday.getDate() - day + 1 + weekOffset * 7);
+      const followingMonday = new Date(monday);
+      followingMonday.setDate(followingMonday.getDate() + 7);
+      const events = await db.agenda.where('date').between(monday, followingMonday, true, false).toArray();
+      const weekView = document.getElementById('week-view');
+      const weekLabel = document.getElementById('week-label');
+      weekLabel.innerText = `${monday.toLocaleDateString('pt-BR')} a ${new Date(followingMonday.getTime() - 1).toLocaleDateString('pt-BR')}`;
+      weekView.replaceChildren();
+
+      for (let index = 0; index < 7; index += 1) {
+        const date = new Date(monday);
+        date.setDate(date.getDate() + index);
+        const dayEvents = events.filter(event => new Date(event.date).toDateString() === date.toDateString());
+        const dayColumn = document.createElement('div');
+        dayColumn.className = 'border border-slate-700 rounded-lg p-2 min-h-24';
+        const heading = document.createElement('strong');
+        heading.className = 'block text-xs text-sky-400 mb-2';
+        heading.innerText = date.toLocaleDateString('pt-BR', { weekday: 'short', day: 'numeric' });
+        dayColumn.appendChild(heading);
+        if (dayEvents.length === 0) {
+          const empty = document.createElement('span');
+          empty.className = 'text-xs text-slate-500';
+          empty.innerText = 'Livre';
+          dayColumn.appendChild(empty);
+        } else {
+          dayEvents.sort((first, second) => new Date(first.date) - new Date(second.date));
+          dayEvents.forEach(event => {
+            const entry = document.createElement('p');
+            entry.className = 'text-xs text-slate-200 mb-1';
+            entry.innerText = `${new Date(event.date).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })} ${event.title}`;
+            dayColumn.appendChild(entry);
+          });
+        }
+        weekView.appendChild(dayColumn);
+      }
+    }
+
+    document.getElementById('previous-week').addEventListener('click', () => {
+      weekOffset -= 1;
+      renderWeek();
+    });
+    document.getElementById('current-week').addEventListener('click', () => {
+      weekOffset = 0;
+      renderWeek();
+    });
+    document.getElementById('next-week').addEventListener('click', () => {
+      weekOffset += 1;
+      renderWeek();
+    });
+
+    function createAgendaItem(event, dateDescription) {
+      const item = document.createElement('article');
+      item.className = 'border border-slate-700 rounded-lg p-3 flex justify-between gap-3 items-center';
+      const details = document.createElement('div');
+      const title = document.createElement('strong');
+      title.className = 'block text-slate-100';
+      title.innerText = event.title;
+      const date = document.createElement('span');
+      date.className = 'text-xs text-slate-400';
+      date.innerText = dateDescription;
+      details.append(title, date);
+      const actions = document.createElement('div');
+      actions.className = 'flex gap-2 shrink-0';
+      const cancelButton = document.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = 'text-xs text-rose-400 hover:text-rose-300';
+      cancelButton.innerText = event.type === 'tarefa' ? 'Concluir' : 'Cancelar';
+      cancelButton.addEventListener('click', () => cancelAgendaEvent(event));
+      actions.append(cancelButton);
+      if (event.type !== 'tarefa') {
+        const editButton = document.createElement('button');
+        editButton.type = 'button';
+        editButton.className = 'text-xs text-sky-400 hover:text-sky-300';
+        editButton.innerText = 'Editar';
+        editButton.addEventListener('click', () => editAgendaEvent(event));
+        actions.prepend(editButton);
+      }
+      item.append(details, actions);
+      return item;
+    }
+
+    async function editAgendaEvent(event) {
+      const value = window.prompt('Informe a nova data e horário:', new Date(event.date).toLocaleString('pt-BR'));
+      if (!value) return;
+      const parsedDate = parseRequestedDate(value);
+      if (!parsedDate) {
+        window.alert('Não consegui identificar a nova data e horário.');
+        return;
+      }
+      await db.agenda.update(event.id, { date: parsedDate });
+      updateNextEvent();
+    }
+
+    async function cancelAgendaEvent(event) {
+      if (!window.confirm(`Cancelar "${event.title}"?`)) return;
+      await db.agenda.delete(event.id);
+      updateNextEvent();
+    }
+
+    document.getElementById('refresh-agenda').addEventListener('click', renderAgenda);
+    document.getElementById('export-agenda').addEventListener('click', exportAgenda);
+    document.getElementById('import-agenda').addEventListener('click', () => document.getElementById('import-file').click());
+    document.getElementById('import-file').addEventListener('change', importAgenda);
+
+    async function exportAgenda() {
+      const events = await db.agenda.toArray();
+      const file = new Blob([JSON.stringify(events, null, 2)], { type: 'application/json' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(file);
+      link.download = `agente-pessoal-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    async function importAgenda(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      try {
+        const data = JSON.parse(await file.text());
+        if (!Array.isArray(data)) throw new Error('Formato inválido');
+        const importedEvents = data.map(item => ({
+          title: String(item.title || 'Novo Compromisso'),
+          date: new Date(item.date),
+          type: item.type === 'lembrete' ? 'lembrete' : 'compromisso'
+        })).filter(item => !Number.isNaN(item.date.getTime()));
+        if (importedEvents.length === 0) throw new Error('Nenhum evento válido');
+        await db.agenda.bulkAdd(importedEvents);
+        appendMessage(`✅ ${importedEvents.length} agendamento(s) importado(s).`, 'agent');
+        updateNextEvent();
+      } catch (error) {
+        appendMessage('Não consegui importar esse arquivo. Use um backup JSON gerado por esta aplicação.', 'agent');
+      } finally {
+        event.target.value = '';
+      }
+    }
+
+    const reminderBtn = document.getElementById('reminder-btn');
+    const reminderTimers = new Map();
+    const reminderOffset = 15 * 60 * 1000;
+    const maxTimeout = 2147483647;
+
+    reminderBtn.addEventListener('click', async () => {
+      if (!('Notification' in window)) {
+        appendMessage('Este navegador não oferece suporte a notificações.', 'agent');
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      updateReminderButton(permission);
+      if (permission === 'granted') {
+        scheduleReminders();
+        appendMessage('🔔 Lembretes ativados. Você receberá uma notificação 15 minutos antes de cada evento.', 'agent');
+      } else {
+        appendMessage('As notificações não foram autorizadas. Você pode ativá-las nas configurações do navegador.', 'agent');
+      }
+    });
+
+    function updateReminderButton(permission) {
+      if (permission === 'granted') {
+        reminderBtn.innerText = '🔔 Lembretes ativos';
+        reminderBtn.classList.replace('bg-slate-700', 'bg-emerald-700');
+        reminderBtn.classList.replace('hover:bg-slate-600', 'hover:bg-emerald-600');
+      } else if (permission === 'denied') {
+        reminderBtn.innerText = '🔕 Lembretes bloqueados';
+      }
+    }
+
+    function scheduleReminders() {
+      reminderTimers.forEach(timer => clearTimeout(timer));
+      reminderTimers.clear();
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+
+      db.agenda.where('date').above(new Date()).toArray().then(events => {
+        events.forEach(scheduleReminder);
+      });
+    }
+
+    function scheduleReminder(event) {
+      const eventDate = new Date(event.date);
+      const reminderDate = new Date(eventDate.getTime() - reminderOffset);
+      const delay = reminderDate.getTime() - Date.now();
+      const timer = setTimeout(() => {
+        if (delay > maxTimeout) {
+          scheduleReminder(event);
+          return;
+        }
+        const reminderKey = `agente-reminder-${event.id}-${eventDate.getTime()}`;
+        if (eventDate > new Date() && !localStorage.getItem(reminderKey)) {
+          new Notification(`Lembrete: ${event.title}`, {
+            body: `Seu compromisso será às ${eventDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}.`
+          });
+          localStorage.setItem(reminderKey, '1');
+        }
+      }, Math.max(0, Math.min(delay, maxTimeout)));
+      reminderTimers.set(event.id, timer);
+    }
+
+    if ('Notification' in window) updateReminderButton(Notification.permission);
+
+    // Reconhecimento de Voz (Web Speech API)
+    const voiceBtn = document.getElementById('voice-btn');
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      const recognition = new SpeechRecognition();
+      recognition.lang = 'pt-BR';
+
+      voiceBtn.addEventListener('click', () => {
+        recognition.start();
+        voiceBtn.classList.add('bg-red-600');
+      });
+
+      recognition.onresult = (event) => {
+        input.value = event.results[0][0].transcript;
+        voiceBtn.classList.remove('bg-red-600');
+      };
+
+      recognition.onend = () => voiceBtn.classList.remove('bg-red-600');
+    }
+
+    updateNextEvent();
+  </script>
+</body>
+</html>
